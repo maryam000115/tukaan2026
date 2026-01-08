@@ -112,21 +112,29 @@ export default function CustomerDashboardPage() {
         </div>
 
         {/* Customer Actions */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <a
             href="/items?customer=true"
             className="bg-white rounded-lg shadow p-6 hover:shadow-md transition-shadow"
           >
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">My Items</h3>
-            <p className="text-sm text-gray-600">View items I have taken</p>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">My Debt</h3>
+            <p className="text-sm text-gray-600">View my outstanding debts (DEEN)</p>
+          </a>
+
+          <a
+            href="/items?customer=true&paymentType=CASH"
+            className="bg-white rounded-lg shadow p-6 hover:shadow-md transition-shadow"
+          >
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Purchase History</h3>
+            <p className="text-sm text-gray-600">View items I have purchased</p>
           </a>
 
           <a
             href="/debts?customer=true"
             className="bg-white rounded-lg shadow p-6 hover:shadow-md transition-shadow"
           >
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">My Debts</h3>
-            <p className="text-sm text-gray-600">View my outstanding debts (DEEN)</p>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Payments</h3>
+            <p className="text-sm text-gray-600">View my payment history</p>
           </a>
         </div>
       </div>

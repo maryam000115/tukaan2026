@@ -14,7 +14,7 @@ export default function RegisterPage() {
   const router = useRouter();
   const [formData, setFormData] = useState({
     accountType: 'customer' as 'customer' | 'staff',
-    tukaan_id: '',
+    shop_id: '',
     first_name: '',
     middle_name: '',
     last_name: '',
@@ -91,8 +91,8 @@ export default function RegisterPage() {
       newErrors.confirmPassword = 'Passwords do not match';
     }
 
-    if (!formData.tukaan_id) {
-      newErrors.tukaan_id = 'Please select a tukaan';
+    if (!formData.shop_id) {
+      newErrors.shop_id = 'Please select a shop';
     }
 
     setErrors(newErrors);
@@ -116,7 +116,7 @@ export default function RegisterPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           accountType: formData.accountType,
-          tukaan_id: parseInt(formData.tukaan_id),
+          shop_id: parseInt(formData.shop_id),
           first_name: formData.first_name.trim(),
           middle_name: formData.middle_name.trim() || undefined,
           last_name: formData.last_name.trim(),
@@ -299,24 +299,24 @@ export default function RegisterPage() {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Select Tukaan <span className="text-red-500">*</span>
+                Select Shop <span className="text-red-500">*</span>
               </label>
               {loadingTukaans ? (
                 <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500 flex items-center">
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600 mr-2"></div>
-                  Loading tukaans...
+                  Loading shops...
                 </div>
               ) : (
                 <select
-                  name="tukaan_id"
+                  name="shop_id"
                   required
-                  value={formData.tukaan_id}
+                  value={formData.shop_id}
                   onChange={handleChange}
                   className={`w-full px-3 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 ${
-                    errors.tukaan_id ? 'border-red-300' : 'border-gray-300'
+                    errors.shop_id ? 'border-red-300' : 'border-gray-300'
                   }`}
                 >
-                  <option value="">-- Select Tukaan --</option>
+                  <option value="">-- Select Shop --</option>
                   {tukaans.map((tukaan) => (
                     <option key={tukaan.id} value={tukaan.id}>
                       {tukaan.name} {tukaan.location && `(${tukaan.location})`}
@@ -324,12 +324,12 @@ export default function RegisterPage() {
                   ))}
                 </select>
               )}
-              {errors.tukaan_id && (
-                <p className="mt-1 text-xs text-red-600">{errors.tukaan_id}</p>
+              {errors.shop_id && (
+                <p className="mt-1 text-xs text-red-600">{errors.shop_id}</p>
               )}
               {tukaans.length === 0 && !loadingTukaans && (
                 <p className="mt-1 text-xs text-yellow-600">
-                  No active tukaans found. Please contact administrator.
+                  No active shops found. Please contact administrator.
                 </p>
               )}
             </div>

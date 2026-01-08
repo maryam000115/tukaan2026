@@ -27,19 +27,44 @@ interface Shop {
   };
 }
 
+interface StaffUser {
+  id: string;
+  firstName: string;
+  middleName?: string;
+  lastName: string;
+  phone: string;
+  role: string;
+  status: string;
+  shopId?: string;
+}
+
+interface CustomerUser {
+  id: string;
+  firstName: string;
+  middleName?: string;
+  lastName: string;
+  phone: string;
+  status: string;
+  shopId?: string;
+}
+
 export default function AdminPanelPage() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [shop, setShop] = useState<Shop | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'shop'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'shop' | 'staff' | 'customers'>('overview');
 
   // Shop edit form state
   const [editingShop, setEditingShop] = useState(false);
   const [shopName, setShopName] = useState('');
   const [location, setLocation] = useState('');
   const [saving, setSaving] = useState(false);
+  const [staff, setStaff] = useState<StaffUser[]>([]);
+  const [customers, setCustomers] = useState<CustomerUser[]>([]);
+  const [loadingStaff, setLoadingStaff] = useState(false);
+  const [loadingCustomers, setLoadingCustomers] = useState(false);
 
   useEffect(() => {
     fetch('/api/auth/me')
@@ -104,6 +129,114 @@ export default function AdminPanelPage() {
       console.error('Error loading shops:', err);
       setError('Failed to load shops');
       setLoading(false);
+    }
+  };
+
+  const loadStaff = async () => {
+    setLoadingStaff(true);
+    try {
+      const res = await fetch('/api/staff', { credentials: 'include' });
+      const data = await res.json();
+      if (data.success && data.staff) {
+        setStaff(data.staff);
+      }
+    } catch (err) {
+      console.error('Error loading staff:', err);
+      setError('Failed to load staff');
+    } finally {
+      setLoadingStaff(false);
+    }
+  };
+
+  const loadCustomers = async () => {
+    setLoadingCustomers(true);
+    try {
+      const res = await fetch('/api/customers', { credentials: 'include' });
+      const data = await res.json();
+      if (data.success && data.customers) {
+        setCustomers(data.customers);
+      }
+    } catch (err) {
+      console.error('Error loading customers:', err);
+      setError('Failed to load customers');
+    } finally {
+      setLoadingCustomers(false);
+    }
+  };
+
+  const handleSuspendStaff = async (staffId: string) => {
+    if (!confirm('Are you sure you want to suspend this staff member?')) return;
+    
+    try {
+      const res = await fetch(`/api/staff/${staffId}/suspend`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.success) {
+        setError('');
+        loadStaff();
+      } else {
+        setError(data.error || 'Failed to suspend staff');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to suspend staff');
+    }
+  };
+
+  const handleActivateStaff = async (staffId: string) => {
+    try {
+      const res = await fetch(`/api/staff/${staffId}/activate`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.success) {
+        setError('');
+        loadStaff();
+      } else {
+        setError(data.error || 'Failed to activate staff');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to activate staff');
+    }
+  };
+
+  const handleSuspendCustomer = async (customerId: string) => {
+    if (!confirm('Are you sure you want to suspend this customer?')) return;
+    
+    try {
+      const res = await fetch(`/api/users/${customerId}/suspend`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.success) {
+        setError('');
+        loadCustomers();
+      } else {
+        setError(data.error || 'Failed to suspend customer');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to suspend customer');
+    }
+  };
+
+  const handleActivateCustomer = async (customerId: string) => {
+    try {
+      const res = await fetch(`/api/users/${customerId}/activate`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.success) {
+        setError('');
+        loadCustomers();
+      } else {
+        setError(data.error || 'Failed to activate customer');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to activate customer');
     }
   };
 
@@ -185,16 +318,44 @@ export default function AdminPanelPage() {
               Overview
             </button>
             {user.role === 'admin' && (
-              <button
-                onClick={() => setActiveTab('shop')}
-                className={`px-4 py-3 border-b-2 font-medium transition-colors ${
-                  activeTab === 'shop'
-                    ? 'border-green-600 text-green-600'
-                    : 'border-transparent text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                Manage Your Shop
-              </button>
+              <>
+                <button
+                  onClick={() => setActiveTab('shop')}
+                  className={`px-4 py-3 border-b-2 font-medium transition-colors ${
+                    activeTab === 'shop'
+                      ? 'border-green-600 text-green-600'
+                      : 'border-transparent text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Manage Your Shop
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveTab('staff');
+                    loadStaff();
+                  }}
+                  className={`px-4 py-3 border-b-2 font-medium transition-colors ${
+                    activeTab === 'staff'
+                      ? 'border-green-600 text-green-600'
+                      : 'border-transparent text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Manage Staff
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveTab('customers');
+                    loadCustomers();
+                  }}
+                  className={`px-4 py-3 border-b-2 font-medium transition-colors ${
+                    activeTab === 'customers'
+                      ? 'border-green-600 text-green-600'
+                      : 'border-transparent text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Manage Customers
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -382,6 +543,166 @@ export default function AdminPanelPage() {
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {activeTab === 'staff' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-lg shadow p-6">
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Manage Staff</h2>
+              {loadingStaff ? (
+                <div className="text-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto"></div>
+                  <p className="mt-2 text-gray-600">Loading staff...</p>
+                </div>
+              ) : staff.length === 0 ? (
+                <p className="text-gray-500 text-center py-8">No staff members found.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Name
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Phone
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Role
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Status
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {staff.map((member) => (
+                        <tr key={member.id}>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {member.firstName} {member.middleName} {member.lastName}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {member.phone}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {member.role}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span
+                              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                member.status === 'ACTIVE'
+                                  ? 'bg-green-100 text-green-800'
+                                  : 'bg-red-100 text-red-800'
+                              }`}
+                            >
+                              {member.status}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                            {member.status === 'ACTIVE' ? (
+                              <button
+                                onClick={() => handleSuspendStaff(member.id)}
+                                className="text-red-600 hover:text-red-900"
+                              >
+                                Suspend
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleActivateStaff(member.id)}
+                                className="text-green-600 hover:text-green-900"
+                              >
+                                Activate
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'customers' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-lg shadow p-6">
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Manage Customers</h2>
+              {loadingCustomers ? (
+                <div className="text-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto"></div>
+                  <p className="mt-2 text-gray-600">Loading customers...</p>
+                </div>
+              ) : customers.length === 0 ? (
+                <p className="text-gray-500 text-center py-8">No customers found.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Name
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Phone
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Status
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {customers.map((customer) => (
+                        <tr key={customer.id}>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {customer.firstName} {customer.middleName} {customer.lastName}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {customer.phone}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span
+                              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                customer.status === 'ACTIVE'
+                                  ? 'bg-green-100 text-green-800'
+                                  : 'bg-red-100 text-red-800'
+                              }`}
+                            >
+                              {customer.status}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                            {customer.status === 'ACTIVE' ? (
+                              <button
+                                onClick={() => handleSuspendCustomer(customer.id)}
+                                className="text-red-600 hover:text-red-900"
+                              >
+                                Suspend
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleActivateCustomer(customer.id)}
+                                className="text-green-600 hover:text-green-900"
+                              >
+                                Activate
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>

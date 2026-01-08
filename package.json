@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "db:setup": "echo Run the SQL schema from lib/db-schema.sql in your MySQL database",
+    "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts"
   },
   "dependencies": {

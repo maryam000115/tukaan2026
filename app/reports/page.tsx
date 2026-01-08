@@ -314,8 +314,24 @@ export default function ReportsPage() {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                         {item.taken_date
-                          ? new Date(item.taken_date).toLocaleDateString()
-                          : new Date(item.created_at).toLocaleDateString()}
+                          ? (() => {
+                              // Ensure date is in ISO format (YYYY-MM-DD)
+                              const date = new Date(item.taken_date);
+                              if (isNaN(date.getTime())) {
+                                // If invalid, try parsing as string
+                                const dateStr = String(item.taken_date).split('T')[0];
+                                return dateStr || 'N/A';
+                              }
+                              return date.toISOString().split('T')[0];
+                            })()
+                          : (() => {
+                              const date = new Date(item.created_at);
+                              if (isNaN(date.getTime())) {
+                                const dateStr = String(item.created_at).split('T')[0];
+                                return dateStr || 'N/A';
+                              }
+                              return date.toISOString().split('T')[0];
+                            })()}
                       </td>
                     </tr>
                   ))}

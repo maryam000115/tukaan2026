@@ -8,7 +8,7 @@ async function handler(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const {
     accountType, // "customer" | "staff"
-    tukaan_id,
+    shop_id,
     first_name,
     middle_name,
     last_name,
@@ -43,8 +43,8 @@ async function handler(request: NextRequest) {
     errors.password = passwordError;
   }
 
-  if (!tukaan_id) {
-    errors.tukaan_id = 'Shop selection is required';
+  if (!shop_id) {
+    errors.shop_id = 'Shop selection is required';
   }
 
   // Normalize phone: remove non-digits
@@ -77,8 +77,6 @@ async function handler(request: NextRequest) {
   }
 
   // Verify shop_id exists (for both customer and staff)
-  // Use shop_id from tukaan_id parameter
-  const shop_id = tukaan_id; // Use shop_id consistently
   if (shop_id) {
     try {
       // Try tukaans table first (legacy name)
@@ -88,9 +86,9 @@ async function handler(request: NextRequest) {
       );
 
       if (!shop) {
-        errors.tukaan_id = 'Selected shop does not exist';
+        errors.shop_id = 'Selected shop does not exist';
       } else if (shop.status && shop.status !== 'ACTIVE') {
-        errors.tukaan_id = 'Selected shop is not active';
+        errors.shop_id = 'Selected shop is not active';
       }
     } catch (error: any) {
       if (error.code === 'ER_NO_SUCH_TABLE') {
@@ -109,7 +107,7 @@ async function handler(request: NextRequest) {
         }
       } else {
         console.error('Shop verification error:', error);
-        errors.tukaan_id = 'Failed to verify shop';
+        errors.shop_id = 'Failed to verify shop';
       }
     }
   }
@@ -133,11 +131,11 @@ async function handler(request: NextRequest) {
         const [uuidResult] = await query<{ id: string }>('SELECT UUID() as id');
         userId = uuidResult[0].id;
 
-        result =       await execute(
+        result = await execute(
         `INSERT INTO users (
-          id, first_name, middle_name, last_name, phone, password, 
-          gender, user_type, shop_id, location, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'normal', ?, ?, NOW())`,
+          id, first_name, middle_name, last_name, phone, password_hash, 
+          gender, user_type, shop_id, location, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'normal', ?, ?, 'ACTIVE', NOW())`,
           [
             userId,
             first_name.trim(),
@@ -154,9 +152,9 @@ async function handler(request: NextRequest) {
         // If UUID approach fails, try AUTO_INCREMENT (omit id field)
         result = await execute(
           `INSERT INTO users (
-            first_name, middle_name, last_name, phone, password, 
-            gender, user_type, shop_id, location, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 'normal', ?, ?, NOW())`,
+            first_name, middle_name, last_name, phone, password_hash, 
+            gender, user_type, shop_id, location, status, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'normal', ?, ?, 'ACTIVE', NOW())`,
           [
             first_name.trim(),
             middle_name?.trim() || null,
@@ -208,7 +206,7 @@ async function handler(request: NextRequest) {
 
         result = await execute(
           `INSERT INTO staff_users (
-            id, shop_id, first_name, middle_name, last_name, phone, password, 
+            id, shop_id, first_name, middle_name, last_name, phone, password_hash, 
             gender, role, status, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'STAFF', 'ACTIVE', NOW())`,
           [
@@ -226,7 +224,7 @@ async function handler(request: NextRequest) {
         // If UUID approach fails, try AUTO_INCREMENT (omit id field)
         result = await execute(
           `INSERT INTO staff_users (
-            shop_id, first_name, middle_name, last_name, phone, password, 
+            shop_id, first_name, middle_name, last_name, phone, password_hash, 
             gender, role, status, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'STAFF', 'ACTIVE', NOW())`,
           [
@@ -290,7 +288,7 @@ async function handler(request: NextRequest) {
         {
           success: false,
           message: 'Selected shop does not exist',
-          errors: { tukaan_id: 'Selected shop does not exist' },
+          errors: { shop_id: 'Selected shop does not exist' },
         },
         { status: 400 }
       );
