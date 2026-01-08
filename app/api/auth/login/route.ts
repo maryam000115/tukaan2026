@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateUser, createSession, checkSystemStatus } from '@/lib/auth';
+import { authenticateUser, createSession, checkSystemStatus, SessionUser } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
 import { validatePhone, validatePassword, formatValidationError } from '@/lib/validation';
 import { withErrorHandling } from '@/lib/error-handler';
@@ -38,7 +38,10 @@ async function handler(request: NextRequest) {
   }
 
   const body = await request.json().catch(() => ({}));
-  const { phone, password } = body;
+  const { phone, password, accountType } = body;
+  
+  // Normalize accountType: 'staff' or 'admin' both map to 'staff' (both in staff_users table)
+  const normalizedAccountType = accountType === 'admin' ? 'staff' : (accountType || 'staff');
 
   // Validation
   const phoneError = validatePhone(phone);
@@ -66,9 +69,75 @@ async function handler(request: NextRequest) {
     );
   }
 
-  const user = await authenticateUser(phone, password);
+  let user: any = null;
+  let suspendedAccount = false;
+  let authError: any = null;
+
+  try {
+    // accountType 'staff' includes both STAFF and ADMIN roles (both in staff_users table)
+    // accountType 'customer' checks users table
+    user = await authenticateUser(phone, password, normalizedAccountType);
+  } catch (error: any) {
+    authError = error;
+    // Check if account is suspended
+    if (error.message === 'ACCOUNT_SUSPENDED') {
+      suspendedAccount = true;
+    } else {
+      console.error('Login authentication error:', error);
+      // Log more details in development
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Full error:', {
+          message: error.message,
+          stack: error.stack,
+          phone: phone,
+        });
+      }
+    }
+  }
+  
+  // Debug logging (always log in development, minimal in production)
+  console.log('Login attempt result:', {
+    phone: phone,
+    userFound: !!user,
+    suspendedAccount,
+    authError: authError?.message,
+    timestamp: new Date().toISOString(),
+  });
+
+  // ✅ Step 4: Handle suspended account - return 403
+  if (suspendedAccount) {
+    try {
+      await createAuditLog(
+        null,
+        'LOGIN_BLOCKED_SUSPENDED',
+        'USER',
+        null,
+        { phone, reason: 'Account suspended' },
+        request.headers.get('x-forwarded-for') || undefined,
+        request.headers.get('user-agent') || undefined
+      );
+    } catch (e) {
+      // Ignore audit log errors
+    }
+    return NextResponse.json(
+      { 
+        success: false, 
+        message: 'Account suspended' 
+      },
+      { status: 403 }
+    );
+  }
 
   if (!user) {
+    // Debug logging (only in development)
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Login failed - no user returned:', {
+        phone: phone,
+        suspendedAccount,
+        authError: authError?.message,
+      });
+    }
+    
     // Audit log for failed login (optional - can skip if audit table doesn't exist)
     try {
       await createAuditLog(
@@ -84,12 +153,44 @@ async function handler(request: NextRequest) {
       // Ignore audit log errors
     }
     return NextResponse.json(
-      { success: false, message: 'Invalid phone or password' },
+      { 
+        success: false, 
+        message: 'Invalid phone or password',
+        debug: process.env.NODE_ENV === 'development' ? {
+          phone: phone,
+          error: authError?.message,
+        } : undefined,
+      },
       { status: 401 }
     );
   }
 
-  const token = await createSession(user);
+  // Ensure user object has all required fields for session
+  const sessionUser: SessionUser = {
+    id: user.id,
+    phone: user.phone,
+    role: user.role,
+    accountType: user.accountType || (user.role === 'customer' ? 'customer' : 'staff'), // ✅ CRITICAL: Always set accountType
+    status: user.status || 'ACTIVE', // ✅ CRITICAL: Always set status for staff
+    shopId: user.shopId || user.tukaanId || null,
+    tukaanId: user.tukaanId || user.shopId || null,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    shopName: user.shopName || null,
+    shopLocation: user.shopLocation || null,
+  };
+
+  // Debug: Log session user before creating token
+  console.log('Creating session with user:', {
+    id: sessionUser.id,
+    phone: sessionUser.phone,
+    role: sessionUser.role,
+    accountType: sessionUser.accountType,
+    status: sessionUser.status,
+    shopId: sessionUser.shopId,
+  });
+
+  const token = await createSession(sessionUser);
 
   await createAuditLog(
     String(user.id),
@@ -104,34 +205,42 @@ async function handler(request: NextRequest) {
   // Clear rate limit on success
   loginAttempts.delete(phone);
 
-  // Determine accountType based on role
-  let accountType: 'customer' | 'staff' = 'customer';
-  if (user.role === 'owner' || user.role === 'admin' || user.role === 'staff') {
-    accountType = 'staff';
-  }
-
+  // Create response with JSON body
   const response = NextResponse.json({
     success: true,
+    accountType: sessionUser.accountType,
     user: {
-      id: user.id,
-      phone: user.phone,
-      role: user.role,
-      accountType, // 'customer' or 'staff'
-      tukaanId: user.tukaanId,
-      shopId: user.shopId,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      shopName: user.shopName,
-      shopLocation: user.shopLocation,
+      id: sessionUser.id,
+      phone: sessionUser.phone,
+      role: sessionUser.role,
+      accountType: sessionUser.accountType,
+      status: sessionUser.status,
+      tukaanId: sessionUser.tukaanId,
+      shopId: sessionUser.shopId,
+      firstName: sessionUser.firstName,
+      lastName: sessionUser.lastName,
+      shopName: sessionUser.shopName,
+      shopLocation: sessionUser.shopLocation,
     },
   });
 
+  // ✅ CRITICAL: Set cookie using NextResponse (NOT Response.json)
+  // Cookie must be set with proper attributes for persistence
   response.cookies.set('session', token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    maxAge: 60 * 60 * 24 * 30, // 30 days
-    path: '/',
+    httpOnly: true, // ✅ Prevents XSS attacks
+    secure: process.env.NODE_ENV === 'production', // ✅ HTTPS only in production
+    sameSite: 'lax', // ✅ CSRF protection
+    maxAge: 60 * 60 * 24 * 30, // ✅ 30 days
+    path: '/', // ✅ Available on all paths
+    // ✅ DO NOT set domain for localhost (browser handles it)
+  });
+
+  // Debug: Log cookie setting
+  console.log('Session cookie set:', {
+    hasToken: !!token,
+    tokenLength: token.length,
+    cookieName: 'session',
+    maxAge: 60 * 60 * 24 * 30,
   });
 
   return response;

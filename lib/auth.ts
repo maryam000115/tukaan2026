@@ -1,6 +1,7 @@
 import { compare, hash } from 'bcryptjs';
 import { queryOne, query } from './db';
 import { SignJWT, jwtVerify } from 'jose';
+import { normalizePhone } from './phone-normalize';
 
 const getSecret = () => {
   const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET;
@@ -14,12 +15,14 @@ export interface SessionUser {
   id: string;
   phone: string;
   role: 'owner' | 'admin' | 'staff' | 'customer';
+  accountType: 'staff' | 'customer'; // Track which table the user came from
   shopId?: string | null;
   tukaanId?: string | null;
   firstName: string;
   lastName: string;
   shopName?: string | null;
   shopLocation?: string | null;
+  status?: string; // For staff users, track status (ACTIVE/SUSPENDED)
 }
 
 export async function hashPassword(password: string): Promise<string> {
@@ -56,207 +59,382 @@ export async function verifySession(token: string): Promise<SessionUser | null> 
 
 export async function authenticateUser(
   phone: string,
-  password: string
+  password: string,
+  accountType: 'staff' | 'customer' = 'staff'
 ): Promise<SessionUser | null> {
-  // Normalize phone: remove non-digits and ensure exactly 9 digits
-  const numericPhone = phone.replace(/\D/g, '');
-  if (numericPhone.length !== 9 || numericPhone.startsWith('0')) {
+  // ✅ Step 1: Normalize phone to exactly 9 digits
+  const normalizedPhone = normalizePhone(phone);
+  
+  if (!normalizedPhone) {
+    console.log('Phone normalization failed:', {
+      originalPhone: phone,
+      reason: 'Must be exactly 9 digits after normalization',
+    });
     return null;
   }
 
-  // NEW SCHEMA: Check staff_users first, then customers
-  // Try staff_users table first
+  console.log('Authenticating user:', {
+    accountType,
+    originalPhone: phone,
+    normalizedPhone,
+  });
+
+  // Based on account type, check ONLY the appropriate table (NO FALLBACK)
+  // accountType === 'staff' means Staff OR Admin (both are in staff_users table)
+  // accountType === 'customer' means Customer (in users table)
+  if (accountType === 'staff') {
+    // Staff/Admin: check ONLY staff_users table
+    return await checkStaffUsersTable(normalizedPhone, password);
+  } else if (accountType === 'customer') {
+    // Customer: check ONLY users table
+    return await checkUsersTable(normalizedPhone, password);
+  } else {
+    // Invalid account type
+    console.error('Invalid account type:', accountType);
+    return null;
+  }
+}
+
+/**
+ * Check staff_users table for login
+ * @param normalizedPhone - Phone number normalized to exactly 9 digits
+ * @param password - Plain text password
+ * @returns SessionUser or null
+ */
+async function checkStaffUsersTable(
+  normalizedPhone: string,
+  password: string
+): Promise<SessionUser | null> {
   let staffUser: any = null;
+  
   try {
+    // ✅ Step 2: SQL query - exact match with normalized phone
+    const query = `SELECT id, shop_id, phone, password, role, status, first_name, middle_name, last_name
+                   FROM staff_users 
+                   WHERE phone = ? 
+                   LIMIT 1`;
+    
     staffUser = await queryOne<{
-      id: number;
+      id: string | number;
+      shop_id: string | number | null;
       phone: string;
       password: string;
       role: string;
-      status: string;
-      tukaan_id: number | null;
+      status: string | null;
       first_name: string;
+      middle_name: string | null;
       last_name: string;
-    }>(
-      `SELECT id, phone, password, role, status, tukaan_id, first_name, last_name 
-       FROM staff_users WHERE phone = ?`,
-      [numericPhone]
-    );
-  } catch (error: any) {
-    // If table doesn't exist, continue to customers check
-    if (error.code !== 'ER_NO_SUCH_TABLE') {
-      console.error('Staff users query error:', error);
+    }>(query, [normalizedPhone]);
+    
+    if (staffUser) {
+      console.log('✅ Staff user found:', {
+        id: staffUser.id,
+        phone: staffUser.phone,
+        role: staffUser.role,
+        status: staffUser.status,
+        hasPassword: !!staffUser.password,
+      });
+    } else {
+      console.log('❌ No staff user found for phone:', normalizedPhone);
+      return null;
     }
+  } catch (error: any) {
+    if (error.code === 'ER_NO_SUCH_TABLE') {
+      console.error('staff_users table does not exist');
+      return null;
+    }
+    console.error('Staff users query error:', error);
+    return null;
   }
 
-  if (staffUser) {
-    // Check if staff user is active
-    if (staffUser.status !== 'ACTIVE') {
-      return null;
-    }
+  if (!staffUser) {
+    return null;
+  }
 
-    const isValid = await verifyPassword(password, staffUser.password);
-    if (!isValid) {
-      return null;
-    }
-
-    // Map role from database to session role
-    let role: 'owner' | 'admin' | 'staff' | 'customer' = 'staff';
-    const dbRole = (staffUser.role || '').toUpperCase();
-
-    if (dbRole === 'SUPER_ADMIN') {
-      role = 'owner';
-    } else if (dbRole === 'ADMIN') {
-      role = 'admin';
-    } else if (dbRole === 'STAFF') {
-      role = 'staff';
-    }
-
-    // Get tukaan info if user belongs to a tukaan
-    let shopName: string | null = null;
-    let shopLocation: string | null = null;
-    if (staffUser.tukaan_id) {
-      try {
-        const tukaan = await queryOne<{
-          name: string;
-          location: string | null;
-        }>(
-          'SELECT name, location FROM tukaans WHERE id = ?',
-          [staffUser.tukaan_id]
-        );
-        if (tukaan) {
-          shopName = tukaan.name;
-          shopLocation = tukaan.location || null;
-        }
-      } catch (error) {
-        // Ignore error, shop info is optional
-      }
-    }
-
-    return {
-      id: String(staffUser.id),
+  // ✅ Step 4: Validate status - MUST be ACTIVE
+  const userStatus = (staffUser.status || '').toUpperCase();
+  if (userStatus !== 'ACTIVE') {
+    console.log('❌ Staff user status is not ACTIVE:', {
+      id: staffUser.id,
       phone: staffUser.phone,
-      role,
-      tukaanId: staffUser.tukaan_id ? String(staffUser.tukaan_id) : null,
-      shopId: staffUser.tukaan_id ? String(staffUser.tukaan_id) : null,
-      firstName: staffUser.first_name,
-      lastName: staffUser.last_name,
-      shopName,
-      shopLocation,
-    };
+      status: staffUser.status,
+    });
+    throw new Error('ACCOUNT_SUSPENDED');
   }
 
-  // If not found in staff_users, try customers table
-  let customer: any = null;
+  // Check if password exists
+  if (!staffUser.password) {
+    console.error('Staff user has no password set:', staffUser.id);
+    return null;
+  }
+
+  // ✅ Step 3: Verify password using bcrypt.compare
+  let isValid = false;
   try {
-    customer = await queryOne<{
-      id: number;
-      phone: string;
-      password: string;
-      status: string;
-      tukaan_id: number;
-      first_name: string;
-      last_name: string;
-    }>(
-      `SELECT id, phone, password, status, tukaan_id, first_name, last_name 
-       FROM customers WHERE phone = ?`,
-      [numericPhone]
-    );
+    isValid = await verifyPassword(password, staffUser.password);
   } catch (error: any) {
-    // If table doesn't exist, try legacy tables
-    if (error.code !== 'ER_NO_SUCH_TABLE') {
-      console.error('Customers query error:', error);
-    }
+    console.error('Password verification error:', {
+      id: staffUser.id,
+      phone: staffUser.phone,
+      error: error.message,
+    });
+    return null;
+  }
+  
+  if (!isValid) {
+    console.log('❌ Password verification failed for staff user:', {
+      id: staffUser.id,
+      phone: staffUser.phone,
+    });
+    return null;
+  }
+  
+  console.log('✅ Password verified successfully');
+
+  // Map role from database to session role
+  let role: 'owner' | 'admin' | 'staff' | 'customer' = 'staff';
+  const dbRole = (staffUser.role || '').toUpperCase();
+
+  if (dbRole === 'SUPER_ADMIN') {
+    role = 'owner';
+  } else if (dbRole === 'ADMIN') {
+    role = 'admin';
+  } else if (dbRole === 'STAFF') {
+    role = 'staff';
   }
 
-  if (customer) {
-    // Check if customer is active
-    if (customer.status !== 'ACTIVE') {
-      return null;
-    }
-
-    const isValid = await verifyPassword(password, customer.password);
-    if (!isValid) {
-      return null;
-    }
-
-    // Get tukaan info
-    let shopName: string | null = null;
-    let shopLocation: string | null = null;
+  // Get shop info if user belongs to a shop
+  let shopName: string | null = null;
+  let shopLocation: string | null = null;
+  if (staffUser.shop_id) {
     try {
-      const tukaan = await queryOne<{
+      const shop = await queryOne<{
         name: string;
         location: string | null;
       }>(
         'SELECT name, location FROM tukaans WHERE id = ?',
-        [customer.tukaan_id]
+        [staffUser.shop_id]
       );
-      if (tukaan) {
-        shopName = tukaan.name;
-        shopLocation = tukaan.location || null;
+      if (shop) {
+        shopName = shop.name;
+        shopLocation = shop.location || null;
       }
     } catch (error) {
       // Ignore error, shop info is optional
     }
-
-    return {
-      id: String(customer.id),
-      phone: customer.phone,
-      role: 'customer',
-      tukaanId: String(customer.tukaan_id),
-      shopId: String(customer.tukaan_id),
-      firstName: customer.first_name,
-      lastName: customer.last_name,
-      shopName,
-      shopLocation,
-    };
   }
 
-  // FALLBACK: Try legacy tables (users, tukaan_users) for backward compatibility
+  // ✅ Step 5: Create session with required fields
+  const sessionId = typeof staffUser.id === 'number' 
+    ? String(staffUser.id) 
+    : String(staffUser.id);
+  
+  const shopIdString = staffUser.shop_id 
+    ? (typeof staffUser.shop_id === 'number' ? String(staffUser.shop_id) : String(staffUser.shop_id))
+    : null;
+  
+  console.log('✅ Staff login successful - creating session:', {
+    userId: sessionId,
+    accountType: 'staff',
+    role,
+    status: staffUser.status,
+    shopId: shopIdString,
+    phone: staffUser.phone,
+  });
+  
+  return {
+    id: sessionId,
+    phone: staffUser.phone,
+    role,
+    accountType: 'staff', // ✅ CRITICAL
+    status: staffUser.status || 'ACTIVE', // ✅ CRITICAL
+    tukaanId: shopIdString,
+    shopId: shopIdString,
+    firstName: staffUser.first_name,
+    lastName: staffUser.last_name,
+    shopName,
+    shopLocation,
+  };
+}
+
+async function checkUsersTable(
+  normalizedPhone: string,
+  password: string
+): Promise<SessionUser | null> {
   let user: any = null;
   try {
+    // Try with password_hash first (new schema)
     user = await queryOne<{
-      id: string;
+      id: string | number;
       phone: string;
-      password_hash: string;
-      role: string;
-      status: string;
-      shop_id: string | null;
+      password_hash?: string;
+      password?: string;
+      role?: string;
+      status?: string;
+      shop_id?: string | null;
+      tukaan_id?: string | null;
       first_name: string;
       last_name: string;
+      user_type?: string;
     }>(
-      `SELECT id, phone, password_hash, role, status, shop_id, first_name, last_name 
-       FROM users WHERE phone = ?`,
-      [numericPhone]
+      `SELECT id, phone, password_hash, password, role, status, shop_id, tukaan_id, first_name, last_name, user_type
+       FROM users 
+       WHERE phone = ?
+       LIMIT 1`,
+      [normalizedPhone]
     );
+    
+    // If password_hash doesn't exist, use password column
+    if (user && !user.password_hash && user.password) {
+      // Already have password column, continue
+    } else if (user && user.password_hash) {
+      // Map password_hash to password for consistency
+      user.password = user.password_hash;
+    }
   } catch (error: any) {
-    // If password_hash column doesn't exist, try with password column
+    // If password_hash column doesn't exist, try with password column only
     if (error.code === 'ER_BAD_FIELD_ERROR' || error.message?.includes('password_hash')) {
       try {
         user = await queryOne<{
-          id: string;
+          id: string | number;
           phone: string;
           password: string;
-          role: string;
-          status: string;
-          shop_id: string | null;
+          role?: string;
+          status?: string;
+          shop_id?: string | null;
+          tukaan_id?: string | null;
           first_name: string;
           last_name: string;
+          user_type?: string;
         }>(
-          `SELECT id, phone, password, role, status, shop_id, first_name, last_name 
-           FROM users WHERE phone = ?`,
-          [numericPhone]
+          `SELECT id, phone, password, role, status, shop_id, tukaan_id, first_name, last_name, user_type
+           FROM users 
+           WHERE phone = ?
+           LIMIT 1`,
+          [normalizedPhone]
         );
-      } catch (err) {
-        // User not found, will try legacy table below
+      } catch (err: any) {
+        console.log('Users table query failed:', err.message);
         user = null;
       }
     } else if (error.code === 'ER_NO_SUCH_TABLE') {
-      // Table doesn't exist, try legacy tukaan_users
+      // Table doesn't exist, will try legacy tukaan_users below
+      console.log('Users table does not exist, trying legacy tables...');
       user = null;
     } else {
-      // Other error, return null
-      return null;
+      console.error('Users query error:', error);
+      user = null;
+    }
+  }
+  
+  // If found in users table, authenticate
+  if (user) {
+    console.log('✅ User found in users table:', {
+      id: user.id,
+      phone: user.phone,
+      user_type: user.user_type,
+      hasPassword: !!(user.password || user.password_hash),
+    });
+    
+    // Check if user has password
+    const userPassword = user.password || user.password_hash;
+    if (!userPassword) {
+      console.log('User has no password set');
+      // Continue to legacy tables below
+    } else {
+      // Verify password
+      let isValid = false;
+      try {
+        isValid = await verifyPassword(password, userPassword);
+      } catch (error: any) {
+        console.error('Password verification error for user:', error.message);
+        // Continue to legacy tables below
+        isValid = false;
+      }
+      
+      if (!isValid) {
+        console.log('Password verification failed for user');
+        return null;
+      }
+      
+      // Check status (if column exists)
+      if (user.status && user.status !== 'ACTIVE') {
+        console.log('User status is not ACTIVE:', user.status);
+        return null;
+      }
+      
+      // Map user_type or role to session role
+      let role: 'owner' | 'admin' | 'staff' | 'customer' = 'customer';
+      const userType = (user.user_type || user.role || '').toUpperCase();
+      
+      if (userType === 'OWNER' || userType === 'SUPER_ADMIN') {
+        role = 'owner';
+      } else if (userType === 'ADMIN') {
+        role = 'admin';
+      } else if (userType === 'STAFF') {
+        role = 'staff';
+      } else if (userType === 'CUSTOMER' || userType === 'NORMAL') {
+        role = 'customer';
+      }
+      
+      // Get shop info
+      const shopId = user.shop_id || user.tukaan_id;
+      let shopName: string | null = null;
+      let shopLocation: string | null = null;
+      
+      if (shopId) {
+        try {
+          // Try tukaans table first
+          const shop = await queryOne<{
+            name: string;
+            location: string | null;
+          }>(
+            'SELECT name, location FROM tukaans WHERE id = ?',
+            [shopId]
+          );
+          if (shop) {
+            shopName = shop.name;
+            shopLocation = shop.location || null;
+          }
+        } catch (error) {
+          // Try shops table as fallback
+          try {
+            const shop = await queryOne<{
+              shop_name: string;
+              name: string;
+              location: string | null;
+            }>(
+              'SELECT shop_name, name, location FROM shops WHERE id = ?',
+              [shopId]
+            );
+            if (shop) {
+              shopName = shop.shop_name || shop.name || null;
+              shopLocation = shop.location || null;
+            }
+          } catch (err) {
+            // Ignore error, shop info is optional
+          }
+        }
+      }
+      
+      console.log('✅ User authenticated successfully:', {
+        id: user.id,
+        phone: user.phone,
+        role: role,
+      });
+      
+      return {
+        id: String(user.id),
+        phone: user.phone,
+        role,
+        accountType: 'customer', // ✅ CRITICAL: Always set accountType for customers
+        tukaanId: shopId ? String(shopId) : null,
+        shopId: shopId ? String(shopId) : null,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        shopName,
+        shopLocation,
+      };
     }
   }
 
@@ -319,69 +497,9 @@ export async function authenticateUser(
     }
   }
 
-  // Legacy users table handling
-  // Check if user is active
-  if (!user || user.status !== 'ACTIVE') {
-    return null;
-  }
-
-  // Handle both password_hash and password column names
-  const userPassword = user.password_hash || (user as any).password;
-  if (!userPassword) {
-    return null;
-  }
-
-  const isValid = await verifyPassword(password, userPassword);
-  if (!isValid) {
-    return null;
-  }
-
-  // Map role from database to session role
-  let role: 'owner' | 'admin' | 'staff' | 'customer' = 'customer';
-  const dbRole = (user.role || '').toUpperCase();
-
-  if (dbRole === 'OWNER') {
-    role = 'owner';
-  } else if (dbRole === 'ADMIN') {
-    role = 'admin';
-  } else if (dbRole === 'STAFF') {
-    role = 'staff';
-  } else if (dbRole === 'CUSTOMER') {
-    role = 'customer';
-  }
-
-  // Get shop info if user belongs to a shop
-  let shopName: string | null = null;
-  let shopLocation: string | null = null;
-  if (user.shop_id) {
-    try {
-      const shop = await queryOne<{
-        shop_name: string;
-        location: string | null;
-      }>(
-        'SELECT shop_name, location FROM shops WHERE id = ?',
-        [user.shop_id]
-      );
-      if (shop) {
-        shopName = shop.shop_name;
-        shopLocation = shop.location || null;
-      }
-    } catch (error) {
-      // Ignore error, shop info is optional
-    }
-  }
-
-  return {
-    id: String(user.id),
-    phone: user.phone,
-    role,
-    tukaanId: user.shop_id || null,
-    shopId: user.shop_id || null,
-    firstName: user.first_name,
-    lastName: user.last_name,
-    shopName,
-    shopLocation,
-  };
+  // If we reach here, user was not found in any table
+  console.log('❌ User not found in any table');
+  return null;
 }
 
 export async function checkSystemStatus(): Promise<boolean> {

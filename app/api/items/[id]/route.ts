@@ -43,7 +43,6 @@ export async function GET(
     } catch (error: any) {
       // If new schema columns don't exist, try actual schema with customer_phone_taken_by and staff_id
       if (error.code === 'ER_BAD_FIELD_ERROR' || error.message?.includes('description') || error.message?.includes('created_by')) {
-        try {
           items = await query<any>(
             `SELECT 
               i.id,
@@ -53,43 +52,37 @@ export async function GET(
               i.quantity,
               i.price,
               i.customer_phone_taken_by as takenBy,
-              i.taken_by as takenByLegacy,
               i.taken_date as takenDate,
               i.staff_id as userId,
-              i.user_id as userIdLegacy,
               i.payment_type,
               i.created_at as createdAt,
+              CASE 
+                WHEN i.staff_id IS NOT NULL AND i.staff_id != '' AND i.staff_id != '0' THEN 'STAFF'
+                WHEN i.customer_phone_taken_by IS NOT NULL AND i.customer_phone_taken_by != '' THEN 'CUSTOMER'
+                ELSE 'UNKNOWN'
+              END AS taken_by_type,
               s.id as creator_id,
               s.first_name as creator_firstName,
-              s.last_name as creator_lastName
+              s.last_name as creator_lastName,
+              u.id as customer_id,
+              u.first_name as customer_firstName,
+              u.last_name as customer_lastName,
+              u.phone as customer_phone
             FROM items i
-            LEFT JOIN staff_users s ON i.staff_id = s.id
+          LEFT JOIN staff_users s ON i.staff_id = s.id 
+            AND s.shop_id = i.shop_id
+            AND i.staff_id IS NOT NULL 
+            AND i.staff_id != '' 
+            AND i.staff_id != '0'
+          LEFT JOIN users u ON i.customer_phone_taken_by = u.phone 
+            AND (u.user_type = 'customer' OR u.user_type = 'normal')
+            AND u.shop_id = i.shop_id
+            AND i.customer_phone_taken_by IS NOT NULL 
+            AND i.customer_phone_taken_by != ''
+            AND (i.staff_id IS NULL OR i.staff_id = '' OR i.staff_id = '0')
             WHERE i.id = ?`,
             [id]
           );
-        } catch (legacyError: any) {
-          // If staff_id doesn't exist, try with user_id
-          items = await query<any>(
-            `SELECT 
-              i.id,
-              i.shop_id as shopId,
-              i.item_name as itemName,
-              i.detail as description,
-              i.quantity,
-              i.price,
-              i.taken_by as takenBy,
-              i.taken_date as takenDate,
-              i.user_id as userId,
-              i.created_at as createdAt,
-              u.id as creator_id,
-              u.first_name as creator_firstName,
-              u.last_name as creator_lastName
-            FROM items i
-            LEFT JOIN users u ON i.user_id = u.id
-            WHERE i.id = ?`,
-            [id]
-          );
-        }
       } else {
         throw error;
       }
@@ -100,6 +93,23 @@ export async function GET(
     }
 
     const itemRow = items[0];
+    // Determine who took the item
+    let takenByInfo = null;
+    if (itemRow.taken_by_type === 'STAFF' && itemRow.creator_id) {
+      takenByInfo = {
+        type: 'STAFF' as const,
+        id: itemRow.creator_id,
+        name: `${itemRow.creator_firstName || ''} ${itemRow.creator_lastName || ''}`.trim(),
+      };
+    } else if (itemRow.taken_by_type === 'CUSTOMER' && itemRow.customer_id) {
+      takenByInfo = {
+        type: 'CUSTOMER' as const,
+        id: itemRow.customer_id,
+        name: `${itemRow.customer_firstName || ''} ${itemRow.customer_lastName || ''}`.trim(),
+        phone: itemRow.customer_phone,
+      };
+    }
+
     const item = {
       id: itemRow.id,
       shopId: itemRow.shopId || null,
@@ -108,8 +118,10 @@ export async function GET(
       price: itemRow.price,
       tag: itemRow.tag || null,
       status: itemRow.status || 'ACTIVE',
-      createdBy: itemRow.createdBy || itemRow.userId || itemRow.userIdLegacy || null,
-      takenBy: itemRow.takenBy || itemRow.takenByLegacy || null,
+      createdBy: itemRow.createdBy || itemRow.userId || null,
+      takenBy: itemRow.takenBy || null,
+      takenByType: itemRow.taken_by_type || 'UNKNOWN',
+      takenByInfo,
       takenDate: itemRow.takenDate || null,
       paymentType: itemRow.payment_type || null,
       createdAt: itemRow.createdAt,

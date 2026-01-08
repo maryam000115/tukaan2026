@@ -3,14 +3,31 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 
+interface CustomerInfo {
+  id: string;
+  firstName: string | null;
+  middleName: string | null;
+  lastName: string | null;
+  phone: string | null;
+  fullName: string;
+}
+
+interface StaffInfo {
+  id: string;
+  firstName: string | null;
+  middleName: string | null;
+  lastName: string | null;
+  phone: string | null;
+  role: string | null;
+  fullName: string;
+}
+
 interface Item {
   id: string;
   shopId: string;
   itemName: string;
   description: string | null;
   price: number;
-  tag: string | null;
-  status: string;
   createdBy: string;
   createdAt: Date | string;
   updatedAt: Date | string;
@@ -19,6 +36,9 @@ interface Item {
   takenDate?: string | null;
   userId?: string | null;
   paymentType?: string | null;
+  takenByType?: 'STAFF' | 'CUSTOMER' | 'UNKNOWN';
+  customerInfo?: CustomerInfo | null;
+  staffInfo?: StaffInfo | null;
   total?: number | null;
 }
 
@@ -30,8 +50,19 @@ interface User {
 
 interface Customer {
   id: string;
-  name: string;
-  phone: string;
+  name?: string;
+  phone?: string;
+  userId?: string;
+  user?: {
+    id: string;
+    firstName?: string;
+    middleName?: string;
+    lastName?: string;
+    phone?: string;
+  };
+  firstName?: string;
+  middleName?: string;
+  lastName?: string;
 }
 
 export default function ItemsPage() {
@@ -47,7 +78,7 @@ export default function ItemsPage() {
   const [loadingCustomers, setLoadingCustomers] = useState(false);
 
   // Filters
-  const [takenType, setTakenType] = useState<'ALL' | 'DEEN' | 'LA_BIXSHAY'>('ALL');
+  const [takenType, setTakenType] = useState<'ALL' | 'DEEN' | 'CASH'>('ALL');
   const [filterCustomerId, setFilterCustomerId] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -63,7 +94,7 @@ export default function ItemsPage() {
   const [quantity, setQuantity] = useState('');
   const [price, setPrice] = useState('');
   const [customerId, setCustomerId] = useState('');
-  const [paymentType, setPaymentType] = useState<'DEEN' | 'LA_BIXSHAY'>('DEEN');
+  const [paymentType, setPaymentType] = useState<'DEEN' | 'CASH'>('DEEN');
 
   // Role check: Admin and Staff can create items
   const canCreateItems = user?.role === 'admin' || user?.role === 'staff';
@@ -74,7 +105,10 @@ export default function ItemsPage() {
   const buildQueryString = () => {
     const params = new URLSearchParams();
     params.set('takenType', takenType);
-    if (filterCustomerId) params.set('customerId', filterCustomerId);
+    if (filterCustomerId && filterCustomerId.trim() !== '') {
+      params.set('customerId', filterCustomerId);
+      console.log('Filtering by customer phone:', filterCustomerId);
+    }
     if (startDate) params.set('startDate', startDate);
     if (endDate) params.set('endDate', endDate);
     return params.toString();
@@ -84,7 +118,9 @@ export default function ItemsPage() {
     const qs = buildQueryString();
     const url = qs ? `/api/items?${qs}` : '/api/items';
 
-    fetch(url)
+    fetch(url, {
+      credentials: 'include', // ✅ IMPORTANT: Include cookies
+    })
       .then((res) => res.json())
       .then((data) => {
         if (data.success && data.items) {
@@ -114,7 +150,7 @@ export default function ItemsPage() {
       return;
     }
     
-    // Check if user can create items
+    // Check if user can create items or filter
     if (!user || (user.role !== 'admin' && user.role !== 'staff')) {
       return;
     }
@@ -123,24 +159,39 @@ export default function ItemsPage() {
     setCreateError(''); // Clear any previous errors
     
     try {
-      const res = await fetch('/api/customers?status=ACTIVE');
+      // Use dedicated dropdown endpoint
+      const res = await fetch('/api/customers/dropdown', {
+        credentials: 'include', // ✅ IMPORTANT: Include cookies
+      });
       const data = await res.json();
       
-      console.log('Customers API response:', data); // Debug log
+      console.log('Customers dropdown API response:', data); // Debug log
       
       if (data.error) {
         console.error('Error loading customers:', data.error);
         setCreateError(`Failed to load customers: ${data.error}`);
         setCustomers([]);
-      } else if (data.customers && Array.isArray(data.customers)) {
-        setCustomers(data.customers);
-        if (data.customers.length === 0) {
-          // Don't show error in filter dropdown, only in create form
-          console.warn('No active customers found for this shop');
+      } else if (data.success && data.customers && Array.isArray(data.customers)) {
+        console.log(`Loaded ${data.customers.length} customers`);
+        // Map dropdown API response to expected format
+        const mappedCustomers = data.customers.map((c: any) => ({
+          id: c.id,
+          phone: c.phone,
+          name: c.fullName,
+          user: {
+            phone: c.phone,
+            firstName: c.firstName,
+            middleName: c.middleName,
+            lastName: c.lastName,
+          },
+        }));
+        setCustomers(mappedCustomers);
+        if (mappedCustomers.length === 0) {
+          console.warn('No customers found for this shop');
         }
       } else {
+        console.warn('Unexpected response format from customers dropdown API:', data);
         setCustomers([]);
-        console.warn('Unexpected response format from customers API:', data);
       }
     } catch (err: any) {
       console.error('Error loading customers:', err);
@@ -153,7 +204,9 @@ export default function ItemsPage() {
 
   useEffect(() => {
     // Check authentication first
-    fetch('/api/auth/me')
+    fetch('/api/auth/me', {
+      credentials: 'include', // ✅ IMPORTANT: Include cookies
+    })
       .then((res) => res.json())
       .then((data) => {
         if (!data.user) {
@@ -178,8 +231,9 @@ export default function ItemsPage() {
   // Reload items when filters change
   useEffect(() => {
     if (!user) return;
+    console.log('Filters changed - reloading items. Customer filter:', filterCustomerId);
     loadItems();
-  }, [takenType, filterCustomerId, startDate, endDate]);
+  }, [takenType, filterCustomerId, startDate, endDate, user]);
 
   const handleCreateItem = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -213,6 +267,7 @@ export default function ItemsPage() {
       const response = await fetch('/api/items/transaction', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include', // ✅ IMPORTANT: Include cookies
         body: JSON.stringify({
           itemName,
           description: description || null,
@@ -264,7 +319,7 @@ export default function ItemsPage() {
         <div className="max-w-7xl mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <a href="/dashboard" className="text-gray-600 hover:text-gray-900">
+              <a href="/dashboard" className="text-gray-900 hover:text-gray-700">
                 ← Back
               </a>
               <h1 className="text-xl font-bold text-gray-900">Items</h1>
@@ -299,46 +354,65 @@ export default function ItemsPage() {
         <div className="bg-white rounded-lg shadow p-4 mb-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">
+              <label className="block text-xs font-medium text-gray-900 mb-1">
                 Taken Type
               </label>
               <select
                 value={takenType}
-                onChange={(e) => setTakenType(e.target.value as 'ALL' | 'DEEN' | 'LA_BIXSHAY')}
+                onChange={(e) => setTakenType(e.target.value as 'ALL' | 'DEEN' | 'CASH')}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-sm"
               >
                 <option value="ALL">All</option>
                 <option value="DEEN">DEEN (Credit)</option>
-                <option value="LA_BIXSHAY">LA BIXSHAY (Paid)</option>
+                <option value="CASH">CASH (Paid)</option>
               </select>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">
+              <label className="block text-xs font-medium text-gray-900 mb-1">
                 Customer
               </label>
-              {customers.length > 0 ? (
+              {loadingCustomers ? (
+                <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-900 text-sm flex items-center">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-900 mr-2"></div>
+                  Loading customers...
+                </div>
+              ) : customers.length > 0 ? (
                 <select
                   value={filterCustomerId}
-                  onChange={(e) => setFilterCustomerId(e.target.value)}
+                  onChange={(e) => {
+                    setFilterCustomerId(e.target.value);
+                    console.log('Customer filter changed:', e.target.value);
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-sm"
                 >
                   <option value="">All customers</option>
-                  {customers.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} ({c.phone})
-                    </option>
-                  ))}
+                  {customers.map((c) => {
+                    // Handle both API response formats
+                    const customerPhone = c.phone || c.user?.phone || '';
+                    const customerName = c.name || 
+                      `${c.user?.firstName || ''} ${c.user?.middleName || ''} ${c.user?.lastName || ''}`.trim() || 
+                      `${c.firstName || ''} ${c.middleName || ''} ${c.lastName || ''}`.trim() ||
+                      customerPhone || 
+                      `Customer ${c.id}`;
+                    return (
+                      <option key={c.id} value={customerPhone}>
+                        {customerName} ({customerPhone})
+                      </option>
+                    );
+                  })}
                 </select>
               ) : (
-                <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500 text-sm">
-                  {loadingCustomers ? 'Loading customers...' : 'No customers available'}
+                <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-900 text-sm">
+                  {user && (user.role === 'admin' || user.role === 'staff') 
+                    ? 'No customers available' 
+                    : 'Loading...'}
                 </div>
               )}
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">
+              <label className="block text-xs font-medium text-gray-900 mb-1">
                 Start Date
               </label>
               <input
@@ -350,7 +424,7 @@ export default function ItemsPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">
+              <label className="block text-xs font-medium text-gray-900 mb-1">
                 End Date
               </label>
               <input
@@ -365,19 +439,19 @@ export default function ItemsPage() {
           {/* Totals Summary */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-gray-100 pt-4 mt-2 text-sm">
             <div>
-              <p className="text-xs font-medium text-gray-500">Total DEEN</p>
+              <p className="text-xs font-medium text-gray-900">Total DEEN</p>
               <p className="text-base font-semibold text-red-600">
                 ${totalDeen.toFixed(2)}
               </p>
             </div>
             <div>
-              <p className="text-xs font-medium text-gray-500">Total PAID</p>
+              <p className="text-xs font-medium text-gray-900">Total PAID</p>
               <p className="text-base font-semibold text-green-600">
                 ${totalPaid.toFixed(2)}
               </p>
             </div>
             <div>
-              <p className="text-xs font-medium text-gray-500">Balance</p>
+              <p className="text-xs font-medium text-gray-900">Balance</p>
               <p
                 className={`text-base font-semibold ${
                   balance > 0 ? 'text-red-600' : balance < 0 ? 'text-green-600' : 'text-gray-700'
@@ -406,7 +480,7 @@ export default function ItemsPage() {
                     setCustomerId('');
                     setPaymentType('DEEN');
                   }}
-                  className="text-gray-400 hover:text-gray-600"
+                  className="text-gray-900 hover:text-gray-700"
                 >
                   ✕
                 </button>
@@ -452,8 +526,8 @@ export default function ItemsPage() {
                     Select Customer (Macmiil) <span className="text-red-500">*</span>
                   </label>
                   {loadingCustomers ? (
-                    <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500 flex items-center">
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600 mr-2"></div>
+                    <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-900 flex items-center">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-900 mr-2"></div>
                       Loading customers...
                     </div>
                   ) : customers.length > 0 ? (
@@ -475,7 +549,7 @@ export default function ItemsPage() {
                     </select>
                   ) : (
                     <div className="w-full">
-                      <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500 mb-2">
+                      <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-900 mb-2">
                         {createError ? createError : 'No customers available'}
                       </div>
                       {createError && !createError.includes('No active customers') && (
@@ -538,19 +612,19 @@ export default function ItemsPage() {
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Payment Type <span className="text-red-500">*</span>
                   </label>
-                  <select
-                    value={paymentType}
-                    onChange={(e) => setPaymentType(e.target.value as 'DEEN' | 'LA_BIXSHAY')}
-                    required
-                    disabled={!canUsePaymentType}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
-                  >
-                    <option value="DEEN">DEEN (Credit)</option>
-                    {canUsePaymentType && <option value="LA_BIXSHAY">LA BIXSHAY (Paid)</option>}
-                  </select>
-                  {!canUsePaymentType && (
-                    <p className="mt-1 text-xs text-gray-500">Staff can only record DEEN transactions</p>
-                  )}
+                    <select
+                      value={paymentType}
+                      onChange={(e) => setPaymentType(e.target.value as 'DEEN' | 'CASH')}
+                      required
+                      disabled={!canUsePaymentType}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    >
+                      <option value="DEEN">DEEN (Credit)</option>
+                      {canUsePaymentType && <option value="CASH">CASH (Paid)</option>}
+                    </select>
+                    {!canUsePaymentType && (
+                      <p className="mt-1 text-xs text-gray-900">Staff can only record DEEN transactions</p>
+                    )}
                 </div>
 
                 <div>
@@ -599,11 +673,11 @@ export default function ItemsPage() {
 
         {items.length === 0 && !error && (
           <div className="bg-white rounded-lg shadow p-8 text-center">
-            <p className="text-gray-600">
+            <p className="text-gray-900">
               {takenType === 'DEEN'
                 ? 'No DEEN items found.'
-                : takenType === 'LA_BIXSHAY'
-                ? 'No paid items found.'
+                : takenType === 'CASH'
+                ? 'No CASH items found.'
                 : 'No items found.'}
             </p>
           </div>
@@ -616,56 +690,89 @@ export default function ItemsPage() {
                 key={item.id}
                 className="bg-white rounded-lg shadow p-4 hover:shadow-md transition-shadow"
               >
-                <div className="flex justify-between items-start mb-2">
+                <div className="flex justify-between items-start mb-3">
                   <div className="flex-1">
                     <h3 className="text-lg font-semibold text-gray-900 mb-1">
                       {item.itemName}
                     </h3>
                     {item.description && (
-                      <p className="text-sm text-gray-600 mb-2">{item.description}</p>
+                      <p className="text-sm text-gray-900 mb-2">{item.description}</p>
                     )}
-                    {item.tag && (
-                      <span className="inline-block bg-gray-100 text-gray-700 text-xs px-2 py-1 rounded mr-2">
-                        {item.tag}
-                      </span>
-                    )}
-                    <span className={`inline-block text-xs px-2 py-1 rounded ${
-                      item.status === 'ACTIVE' 
-                        ? 'bg-green-100 text-green-700' 
-                        : 'bg-gray-100 text-gray-700'
-                    }`}>
-                      {item.status}
-                    </span>
                   </div>
                   <div className="text-right">
                     <p className="text-lg font-bold text-green-600">
                       ${item.price.toFixed(2)}
                     </p>
+                    {item.quantity && item.quantity > 1 && (
+                      <p className="text-xs text-gray-900">
+                        Qty: {item.quantity} × ${(item.price / item.quantity).toFixed(2)}
+                      </p>
+                    )}
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 mt-3 pt-3 border-t border-gray-200">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 pt-3 border-t border-gray-200">
+                  {/* Payment Type */}
                   <div>
-                    <span className="text-xs font-medium text-gray-500">Price:</span>
-                    <span className="ml-2 text-sm text-gray-900">
-                      ${typeof item.price === 'number' ? item.price.toFixed(2) : item.price}
+                    <span className="text-xs font-medium text-gray-900">Payment Type:</span>
+                    <span className={`ml-2 text-sm font-medium ${
+                      item.paymentType === 'DEEN' 
+                        ? 'text-red-600' 
+                        : item.paymentType === 'CASH' || item.paymentType === 'LA_BIXSHAY' || item.paymentType === 'PAID'
+                        ? 'text-green-600'
+                        : 'text-gray-900'
+                    }`}>
+                      {item.paymentType === 'DEEN' 
+                        ? 'DEEN (Credit)' 
+                        : item.paymentType === 'CASH' || item.paymentType === 'LA_BIXSHAY' || item.paymentType === 'PAID'
+                        ? 'CASH (Paid)'
+                        : item.paymentType || 'N/A'}
                     </span>
                   </div>
-                  <div>
-                    <span className="text-xs font-medium text-gray-500">Status:</span>
-                    <span className="ml-2 text-sm text-gray-900">{item.status}</span>
-                  </div>
-                  <div>
-                    <span className="text-xs font-medium text-gray-500">Created:</span>
-                    <span className="ml-2 text-sm text-gray-900">
-                      {new Date(item.createdAt).toLocaleDateString()}
-                    </span>
-                  </div>
-                  {item.updatedAt && (
+
+                  {/* Taken By - Always shows customer (who took the item) */}
+                  {item.customerInfo && (
                     <div>
-                      <span className="text-xs font-medium text-gray-500">Updated:</span>
+                      <span className="text-xs font-medium text-gray-900">Taken By:</span>
                       <span className="ml-2 text-sm text-gray-900">
-                        {new Date(item.updatedAt).toLocaleDateString()}
+                        {item.customerInfo.fullName || 'N/A'}
+                        {item.customerInfo.phone && (
+                          <span className="text-gray-900 ml-1">({item.customerInfo.phone})</span>
+                        )}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Recorded By - Always shows staff (who recorded the item) */}
+                  {item.staffInfo && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-900">Recorded By:</span>
+                      <span className="ml-2 text-sm text-gray-900">
+                        {item.staffInfo.fullName || 'N/A'}
+                        <span className="text-gray-900 ml-1">(STAFF)</span>
+                        {item.staffInfo.phone && (
+                          <span className="text-gray-900 ml-1">- {item.staffInfo.phone}</span>
+                        )}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Taken Date */}
+                  {item.takenDate && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-900">Taken Date:</span>
+                      <span className="ml-2 text-sm text-gray-900">
+                        {new Date(item.takenDate).toLocaleDateString()}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Total */}
+                  {item.total && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-900">Total:</span>
+                      <span className="ml-2 text-sm font-semibold text-gray-900">
+                        ${item.total.toFixed(2)}
                       </span>
                     </div>
                   )}

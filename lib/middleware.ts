@@ -6,30 +6,64 @@ export interface SessionUser {
   id: string;
   phone: string;
   role: 'owner' | 'admin' | 'staff' | 'customer';
+  accountType: 'staff' | 'customer'; // Track which table the user came from
   shopId?: string | null;
   tukaanId?: string | null;
   firstName: string;
   lastName: string;
   shopName?: string | null;
   shopLocation?: string | null;
-  status?: string;
+  status?: string; // For staff users, track status (ACTIVE/SUSPENDED)
 }
 
 export async function getSession(request: NextRequest): Promise<{
   user: SessionUser | null;
   error?: string;
 } | null> {
-  const token = request.cookies.get('session')?.value;
+  // ✅ CRITICAL: Read cookie with exact name 'session'
+  const cookie = request.cookies.get('session');
+  const token = cookie?.value;
+
+  // Debug logging (always log for troubleshooting)
+  console.log('getSession - Cookie check:', {
+    hasCookie: !!cookie,
+    hasToken: !!token,
+    tokenLength: token?.length,
+    cookieName: cookie?.name,
+    allCookies: Array.from(request.cookies.getAll()).map(c => c.name),
+  });
 
   if (!token) {
+    console.log('getSession - No session token found in cookies');
     return null;
   }
 
   const user = await verifySession(token);
 
   if (!user) {
+    console.log('getSession - Token verification failed (invalid/expired token)');
     return null;
   }
+
+  // ✅ CRITICAL: Verify required fields exist
+  if (!user.id || !user.phone || !user.accountType) {
+    console.error('getSession - Session missing required fields:', {
+      hasId: !!user.id,
+      hasPhone: !!user.phone,
+      hasAccountType: !!user.accountType,
+      userKeys: Object.keys(user),
+    });
+    return null;
+  }
+
+  console.log('getSession - User verified:', {
+    id: user.id,
+    phone: user.phone,
+    role: user.role,
+    accountType: user.accountType,
+    status: user.status,
+    shopId: user.shopId,
+  });
 
   // Check system status - if locked, block all non-owner users
   const isSystemActive = await checkSystemStatus();
@@ -37,48 +71,56 @@ export async function getSession(request: NextRequest): Promise<{
     return { user: null, error: 'SYSTEM_LOCKED' };
   }
 
-  // Verify user is still active in database (optional - skip if table/columns don't exist)
-  try {
-    let dbUser: any[] = [];
+  // CRITICAL: Verify staff/admin is still ACTIVE in database
+  // If status is SUSPENDED, block access and force logout
+  if (user.role === 'admin' || user.role === 'staff' || user.role === 'owner') {
     try {
-      dbUser = await query<any>(
-        'SELECT id, status, shop_id as shopId, role FROM users WHERE id = ?',
+      const dbStaff = await query<any>(
+        'SELECT id, status, shop_id as shopId, role FROM staff_users WHERE id = ?',
         [user.id]
       );
-    } catch (error: any) {
-      // If users table doesn't exist or status column missing, try legacy table
-      if (
-        error.code === 'ER_NO_SUCH_TABLE' ||
-        error.code === 'ER_BAD_FIELD_ERROR' ||
-        error.message?.includes('users') ||
-        error.message?.includes('status')
-      ) {
-        try {
-          dbUser = await query<any>(
-            'SELECT id, tukaan_id as shopId, user_type as role FROM tukaan_users WHERE id = ?',
-            [user.id]
-          );
-        } catch (legacyError) {
-          // Both failed, continue with session data
-          console.warn(`User ${user.id} not found in users/tukaan_users tables, using session data`);
+
+      if (dbStaff.length > 0) {
+        const staffStatus = dbStaff[0].status;
+        
+        // CRITICAL: Block SUSPENDED staff/admin
+        if (staffStatus && staffStatus !== 'ACTIVE') {
+          return { user: null, error: 'ACCOUNT_SUSPENDED' };
         }
+
+        // Update session user with latest shop_id
+        user.shopId = dbStaff[0].shopId || user.shopId || null;
       } else {
-        throw error;
+        // Staff user not found in database - account may have been deleted
+        return { user: null, error: 'USER_NOT_FOUND' };
+      }
+    } catch (error: any) {
+      // If staff_users table doesn't exist, log warning but allow access
+      if (error.code === 'ER_NO_SUCH_TABLE') {
+        console.warn('staff_users table not found - cannot verify status');
+      } else {
+        console.error('Error verifying staff status:', error);
+        // On error, block access for security
+        return { user: null, error: 'VERIFICATION_FAILED' };
       }
     }
+  }
 
-    if (dbUser.length > 0) {
-      // Check if user is active (if status column exists)
-      if (dbUser[0].status && dbUser[0].status !== 'ACTIVE') {
-        return { user: null, error: 'USER_INACTIVE' };
+  // For customers, verify in users table (optional)
+  if (user.role === 'customer') {
+    try {
+      const dbCustomer = await query<any>(
+        'SELECT id, shop_id as shopId FROM users WHERE id = ? AND user_type IN (?, ?)',
+        [user.id, 'customer', 'normal']
+      );
+
+      if (dbCustomer.length > 0) {
+        user.shopId = dbCustomer[0].shopId || user.shopId || null;
       }
-
-      // Update session user with latest shop_id/tukaan_id
-      user.shopId = dbUser[0].shopId || dbUser[0].tukaan_id || user.shopId || null;
+    } catch (error) {
+      // Ignore errors for customer verification (non-critical)
+      console.warn('Customer verification error (non-fatal):', error);
     }
-  } catch (error) {
-    console.error('Error verifying user status (non-fatal):', error);
-    // Continue with session data if verification fails
   }
 
   return { user: user as SessionUser };

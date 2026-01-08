@@ -23,8 +23,17 @@ export async function createAuditLog(
         userAgent || null,
       ]
     );
-  } catch (error) {
-    // Don't fail the main operation if audit logging fails
+  } catch (error: any) {
+    // ✅ Don't fail the main operation if audit logging fails
+    // Handle missing audit_logs table gracefully
+    if (error.code === 'ER_NO_SUCH_TABLE' || error.message?.includes('audit_logs')) {
+      // Table doesn't exist - audit logging is optional
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('audit_logs table not found - audit logging skipped');
+      }
+      return;
+    }
+    // Other errors (permissions, etc.) - log but don't fail
     console.error('Audit log error:', error);
   }
 }

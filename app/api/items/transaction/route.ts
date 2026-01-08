@@ -93,46 +93,62 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Verify customer exists and belongs to the same shop
-    // Verify customer exists and belongs to the same shop
-    let customers: { id: string; shopId: string | null }[] = [];
+    // Verify customer exists in users table and belongs to the same shop
+    // customerId can be either user.id or user.phone
+    let customerData: { id: string; phone: string; shopId: string | null } | null = null;
+    
     try {
-      customers = await query<{
+      // Try to find customer by ID first
+      const customersById = await query<{
         id: string;
+        phone: string;
         shopId: string | null;
       }>(
-        'SELECT id, shop_id as shopId FROM customers WHERE id = ?',
+        `SELECT id, phone, shop_id as shopId 
+         FROM users 
+         WHERE id = ? AND (user_type = 'customer' OR user_type = 'normal')`,
         [customerId]
       );
-    } catch (error: any) {
-      // If customers table or shop_id column doesn't exist, fall back to tukaan_users
-      if (
-        error.code === 'ER_NO_SUCH_TABLE' ||
-        error.code === 'ER_BAD_FIELD_ERROR' ||
-        error.message?.includes('customers') ||
-        error.message?.includes('shop_id')
-      ) {
-        const legacyCustomers = await query<{
+      
+      if (customersById.length > 0) {
+        customerData = customersById[0];
+      } else {
+        // Try to find by phone (customerId might be a phone number)
+        const customersByPhone = await query<{
           id: string;
+          phone: string;
           shopId: string | null;
         }>(
-          'SELECT id, tukaan_id as shopId FROM tukaan_users WHERE id = ?',
+          `SELECT id, phone, shop_id as shopId 
+           FROM users 
+           WHERE phone = ? AND (user_type = 'customer' OR user_type = 'normal')`,
           [customerId]
         );
-        customers = legacyCustomers;
-      } else {
-        console.error('Customer verification error:', error);
-        throw error;
+        
+        if (customersByPhone.length > 0) {
+          customerData = customersByPhone[0];
+        }
       }
+    } catch (error: any) {
+      console.error('Customer verification error:', error);
+      return NextResponse.json(
+        { error: 'Failed to verify customer' },
+        { status: 500 }
+      );
     }
 
-    if (
-      customers.length === 0 ||
-      (shopId && customers[0].shopId && customers[0].shopId !== shopId)
-    ) {
+    if (!customerData) {
       return NextResponse.json(
-        { error: 'Customer not found or does not belong to your shop' },
+        { error: 'Customer not found' },
         { status: 404 }
+      );
+    }
+
+    // Verify customer belongs to the same shop
+    if (shopId && customerData.shopId && customerData.shopId !== shopId) {
+      return NextResponse.json(
+        { error: 'Customer does not belong to your shop' },
+        { status: 403 }
       );
     }
 
@@ -145,21 +161,8 @@ export async function POST(req: NextRequest) {
     );
     const itemId = itemUuidRow.id;
 
-    // Get customer phone for customer_phone_taken_by
-    let customerPhone: string | null = null;
-    try {
-      const customerData = await queryOne<{ phone: string }>(
-        'SELECT phone FROM customers WHERE id = ?',
-        [customerId]
-      );
-      if (customerData) {
-        customerPhone = customerData.phone;
-      }
-    } catch (error: any) {
-      // If customers table doesn't exist or query fails, try to use customerId as phone
-      console.warn('Could not fetch customer phone, using customerId:', error);
-      customerPhone = customerId;
-    }
+    // Use customer phone for customer_phone_taken_by
+    const customerPhone = customerData.phone;
 
     // Insert into items table using actual schema: customer_phone_taken_by, shop_id, staff_id
     try {
@@ -174,57 +177,16 @@ export async function POST(req: NextRequest) {
           description || null,
           qty,
           unitPrice,
-          customerPhone || customerId, // customer_phone_taken_by
+          customerPhone, // customer_phone_taken_by (from users.phone)
           user.id, // staff_id = staff/admin who recorded
           shopId, // shop_id
           finalPaymentType, // payment_type
         ]
       );
     } catch (error: any) {
-      // If customer_phone_taken_by doesn't exist, try with taken_by
-      if (
-        error.code === 'ER_BAD_FIELD_ERROR' ||
-        error.message?.includes('customer_phone_taken_by') ||
-        error.message?.includes('staff_id')
-      ) {
-        try {
-          // Fallback to legacy schema with taken_by and user_id
-          await query(
-            `INSERT INTO items (
-              id, item_name, detail, quantity, price,
-              taken_by, taken_date, user_id, shop_id, payment_type, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, NOW())`,
-            [
-              itemId,
-              itemName,
-              description || null,
-              qty,
-              unitPrice,
-              customerId, // taken_by = customer ID
-              user.id, // user_id = staff/admin who recorded
-              shopId, // shop_id
-              finalPaymentType, // payment_type
-            ]
-          );
-        } catch (legacyError: any) {
-          // If that also fails, try minimal schema
-          await query(
-            `INSERT INTO items (
-              id, item_name, detail, quantity, price, created_at
-            ) VALUES (?, ?, ?, ?, ?, NOW())`,
-            [
-              itemId,
-              itemName,
-              description || null,
-              qty,
-              unitPrice,
-            ]
-          );
-        }
-      } else {
-        console.error('Item transaction insert error:', error);
-        throw error;
-      }
+      // If insert fails, log error and rethrow
+      console.error('Item transaction insert error:', error);
+      throw error;
     }
 
     // Record in debt_ledger based on payment type (optional - skip if table doesn't exist)
@@ -245,10 +207,10 @@ export async function POST(req: NextRequest) {
         status = 'UNPAID'; // DEEN transactions are unpaid/credit
         notes = `DEEN item transaction: ${itemName} x${qty} @ ${unitPrice}`;
       } else {
-        // LA_BIXSHAY (paid immediately)
+        // CASH (paid immediately)
         transactionType = TransactionType.PAYMENT;
         status = 'PAID';
-        notes = `LA BIXSHAY item transaction: ${itemName} x${qty} @ ${unitPrice}`;
+        notes = `CASH item transaction: ${itemName} x${qty} @ ${unitPrice}`;
       }
 
       await query(
@@ -259,7 +221,7 @@ export async function POST(req: NextRequest) {
         [
           debtId,
           shopId,
-          customerId,
+          customerData.id, // Use customerData.id from users table
           null,
           transactionType,
           totalAmount,
@@ -291,7 +253,8 @@ export async function POST(req: NextRequest) {
         'ITEM',
         itemId,
         {
-          customerId,
+          customerId: customerData.id,
+          customerPhone: customerPhone,
           quantity: qty,
           price: unitPrice,
           totalAmount,
@@ -316,10 +279,11 @@ export async function POST(req: NextRequest) {
           quantity: qty,
           price: unitPrice,
           totalAmount,
-          customerId,
-          takenBy: customerId, // customer (macmiil) who took the item
+          customerId: customerData.id,
+          customerPhone: customerPhone,
+          takenBy: customerPhone, // customer phone (macmiil) who took the item
           recordedBy: user.id, // staff/admin who recorded it
-          shopId, // staff/admin's tukaan
+          shopId, // staff/admin's shop
           paymentType: finalPaymentType,
           status, // UNPAID for DEEN, PAID for LA_BIXSHAY
           transactionType,

@@ -57,138 +57,163 @@ export async function GET(req: NextRequest) {
       params.push(status);
     }
 
-    const whereClause = whereConditions.length > 0 
-      ? `WHERE ${whereConditions.join(' AND ')}` 
-      : '';
-
+    // Build WHERE clause for users table (customers are in users table with user_type = 'customer')
+    // For ADMIN/STAFF: filter by shop_id from session
+    // For CUSTOMER: filter by user_id (they can only see themselves)
+    // For OWNER: no filter (can see all)
+    
     let customers: any[] = [];
-    let useLegacyTable = false;
-
-    // Try new customers table first
+    
     try {
-      customers = await query<any>(
-        `SELECT 
-          c.id,
-          c.shop_id as shopId,
-          c.user_id as userId,
-          c.name,
-          c.phone,
-          c.address,
-          c.status,
-          c.created_at as createdAt,
-          c.updated_at as updatedAt,
-          u.id as user_id,
-          u.first_name as user_firstName,
-          u.middle_name as user_middleName,
-          u.last_name as user_lastName,
-          u.phone as user_phone,
-          u.email as user_email
-        FROM customers c
-        LEFT JOIN users u ON c.user_id = u.id
-        ${whereClause}
-        ORDER BY c.created_at DESC`,
-        params
-      );
+      // Query users table where user_type = 'customer' or 'normal' and filtered by shop_id
+      if (userRole === UserRole.CUSTOMER) {
+        // Customer can only see themselves
+        customers = await query<any>(
+          `SELECT 
+            u.id,
+            u.shop_id as shopId,
+            u.first_name,
+            u.middle_name,
+            u.last_name,
+            u.phone,
+            u.gender,
+            u.user_type,
+            u.shop_id,
+            u.location,
+            u.created_at as createdAt
+          FROM users u
+          WHERE (u.user_type = 'customer' OR u.user_type = 'normal') AND u.id = ?
+          ORDER BY u.created_at DESC`,
+          [user.id]
+        );
+      } else if (userRole === UserRole.ADMIN || userRole === UserRole.STAFF) {
+        // Admin/Staff see customers from their shop
+        const shopId = user.shopId || user.tukaanId;
+        if (!shopId) {
+          return NextResponse.json({ 
+            customers: [],
+            message: 'You must be associated with a shop'
+          });
+        }
+        
+        let customerWhere = ['(u.user_type = ? OR u.user_type = ?)', 'u.shop_id = ?'];
+        let customerParams: any[] = ['customer', 'normal', shopId];
+        
+        if (status) {
+          // Note: users table may not have status column, so we'll skip status filter for now
+          // If you need status filtering, you may need to add a status column or use a different approach
+        }
+        
+        customers = await query<any>(
+          `SELECT 
+            u.id,
+            u.shop_id as shopId,
+            u.first_name,
+            u.middle_name,
+            u.last_name,
+            u.phone,
+            u.gender,
+            u.user_type,
+            u.shop_id,
+            u.location,
+            u.created_at as createdAt
+          FROM users u
+          WHERE ${customerWhere.join(' AND ')}
+          ORDER BY u.created_at DESC`,
+          customerParams
+        );
+      } else if (userRole === UserRole.OWNER) {
+        // Owner can see all customers
+        let ownerWhere = ['(u.user_type = ? OR u.user_type = ?)'];
+        let ownerParams: any[] = ['customer', 'normal'];
+        
+        customers = await query<any>(
+          `SELECT 
+            u.id,
+            u.shop_id as shopId,
+            u.first_name,
+            u.middle_name,
+            u.last_name,
+            u.phone,
+            u.gender,
+            u.user_type,
+            u.shop_id,
+            u.location,
+            u.created_at as createdAt
+          FROM users u
+          WHERE ${ownerWhere.join(' AND ')}
+          ORDER BY u.created_at DESC`,
+          ownerParams
+        );
+      }
     } catch (error: any) {
-      // If customers table doesn't exist or JOIN fails, use legacy table
+      console.error('Customers query error:', error);
+      // If users table doesn't exist or query fails, try fallback to tukaan_users
       if (
         error.code === 'ER_NO_SUCH_TABLE' ||
         error.code === 'ER_BAD_FIELD_ERROR' ||
-        error.message?.includes('customers') ||
         error.message?.includes('users')
       ) {
-        console.log('Customers table not found or JOIN failed, using tukaan_users fallback');
-        useLegacyTable = true;
-        customers = [];
-      } else {
-        console.error('Customers table query error:', error);
-        throw error;
-      }
-    }
+        console.log('Users table query failed, trying tukaan_users fallback');
+        const shopId = user.shopId || user.tukaanId;
+        if (shopId && (userRole === UserRole.ADMIN || userRole === UserRole.STAFF)) {
+          try {
+            const legacyCustomers = await query<any>(
+              `SELECT 
+                id,
+                first_name,
+                last_name,
+                phone,
+                user_type,
+                tukaan_id
+              FROM tukaan_users
+              WHERE (user_type = 'normal' OR user_type = 'customer') AND tukaan_id = ?
+              ORDER BY id DESC`,
+              [shopId]
+            );
 
-    // Fallback: use tukaan_users as customers when customers table doesn't exist or is empty
-    if (
-      useLegacyTable ||
-      (customers.length === 0 &&
-      (userRole === UserRole.ADMIN || userRole === UserRole.STAFF) &&
-      (user.tukaanId || user.shopId))
-    ) {
-      const shopId = user.shopId || user.tukaanId;
-      if (!shopId) {
-        return NextResponse.json({ 
-          customers: [],
-          message: 'No shop associated with your account'
-        });
-      }
-
-      try {
-        // Build legacy query with status filter if needed
-        let legacyWhere = `(user_type = 'normal' OR user_type = 'customer') AND tukaan_id = ?`;
-        const legacyParams: any[] = [shopId];
-        
-        // Apply status filter if provided (for legacy, we assume ACTIVE if status filter is ACTIVE)
-        if (status && status === 'ACTIVE') {
-          // For legacy table, we don't have status column, so we'll return all
-          // You can add additional filtering here if needed
+            customers = legacyCustomers.map((c: any) => ({
+              id: String(c.id),
+              shopId: c.tukaan_id,
+              first_name: c.first_name,
+              middle_name: null,
+              last_name: c.last_name,
+              phone: c.phone,
+              gender: null,
+              user_type: c.user_type,
+              shop_id: c.tukaan_id,
+              location: null,
+              createdAt: null,
+            }));
+          } catch (legacyError: any) {
+            console.error('Legacy tukaan_users customers query error:', legacyError);
+            customers = [];
+          }
+        } else {
+          customers = [];
         }
-
-        const legacyCustomers = await query<any>(
-          `SELECT 
-            id,
-            first_name,
-            last_name,
-            phone,
-            user_type,
-            tukaan_id
-          FROM tukaan_users
-          WHERE ${legacyWhere}
-          ORDER BY id DESC`,
-          legacyParams
-        );
-
-        customers = legacyCustomers.map((c: any) => ({
-          id: String(c.id),
-          shopId: c.tukaan_id,
-          userId: String(c.id),
-          name: `${c.first_name || ''} ${c.last_name || ''}`.trim() || c.phone || `Customer ${c.id}`,
-          phone: c.phone || '',
-          address: null,
-          status: 'ACTIVE',
-          createdAt: null,
-          updatedAt: null,
-          user_id: String(c.id),
-          user_firstName: c.first_name,
-          user_middleName: null,
-          user_lastName: c.last_name,
-          user_phone: c.phone,
-          user_email: null,
-        }));
-
-        console.log(`Loaded ${customers.length} customers from tukaan_users for shop ${shopId}`);
-      } catch (legacyError: any) {
-        console.error('Legacy tukaan_users customers query error:', legacyError);
-        // Return empty array instead of error
-        customers = [];
+      } else {
+        throw error;
       }
     }
 
     const formattedCustomers = customers.map((c: any) => ({
       id: c.id,
-      shopId: c.shopId,
-      userId: c.userId,
-      name: c.name,
-      phone: c.phone,
-      address: c.address,
-      status: c.status,
-      createdAt: c.createdAt,
-      updatedAt: c.updatedAt,
+      shopId: c.shopId || c.shop_id,
+      userId: c.id, // For users table, id is the user_id
+      name: `${c.first_name || ''} ${c.middle_name || ''} ${c.last_name || ''}`.trim() || c.phone || `Customer ${c.id}`,
+      phone: c.phone || '',
+      address: c.location || null,
+      status: 'ACTIVE', // Default status since users table may not have status column
+      createdAt: c.createdAt || c.created_at || null,
+      updatedAt: null, // users table may not have updated_at
       user: {
-        id: c.user_id,
-        firstName: c.user_firstName,
-        middleName: c.user_middleName,
-        lastName: c.user_lastName,
-        phone: c.user_phone,
-        email: c.user_email,
+        id: c.id,
+        firstName: c.first_name,
+        middleName: c.middle_name,
+        lastName: c.last_name,
+        phone: c.phone,
+        email: null, // users table may not have email
       },
     }));
 

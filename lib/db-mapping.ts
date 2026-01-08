@@ -43,9 +43,11 @@ export const ITEM_COLUMNS = {
   description: 'detail', // Maps to detail in existing DB
   quantity: 'quantity',
   price: 'price',
-  takenBy: 'taken_by',
+  customerPhoneTakenBy: 'customer_phone_taken_by', // Customer phone who took the item
+  staffId: 'staff_id', // Staff who took/recorded the item
   takenDate: 'taken_date',
-  userId: 'user_id', // Instead of shop_id and created_by
+  shopId: 'shop_id', // Shop/tukaan the item belongs to
+  paymentType: 'payment_type',
   createdAt: 'created_at',
 };
 

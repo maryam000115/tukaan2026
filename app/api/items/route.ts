@@ -4,6 +4,7 @@ import { query, execute } from '@/lib/db';
 import { UserRole, UserStatus } from '@/lib/types';
 import { canCreateItems, checkShopAccess } from '@/lib/permissions';
 import { createAuditLog } from '@/lib/audit';
+import { buildItemsQuery, addItemFilters, ItemQueryResult } from '@/lib/items-query';
 
 export async function GET(req: NextRequest) {
   try {
@@ -17,7 +18,7 @@ export async function GET(req: NextRequest) {
     
     // Filters
     const searchParams = req.nextUrl.searchParams;
-    const takenType = (searchParams.get('takenType') || 'ALL').toUpperCase(); // ALL | DEEN | LA_BIXSHAY
+    const takenType = (searchParams.get('takenType') || 'ALL').toUpperCase(); // ALL | DEEN | CASH
     const customerId = searchParams.get('customerId');
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
@@ -26,107 +27,57 @@ export async function GET(req: NextRequest) {
     let whereConditions: string[] = [];
     let params: any[] = [];
 
-    // Owner can see all items, Admin/Staff see items in their shop
-    if (userRole === UserRole.ADMIN || userRole === UserRole.STAFF) {
-      if (user.shopId || user.tukaanId) {
-        const shopId = user.shopId || user.tukaanId;
-        // Try shop_id first (actual schema), fallback handled in query
-        whereConditions.push('shop_id = ?');
-        params.push(shopId);
-      } else {
+    // Shop-scoped visibility rules:
+    // - Owner: can see all items (no shop filter)
+    // - Admin/Staff: can only see items where items.shop_id = session.shopId
+    // - Customer: can only see items where customer_phone_taken_by = their phone AND shop_id = their shop_id
+    
+    let shopId: string | number | undefined;
+    let customerPhone: string | undefined;
+    
+    if (userRole === UserRole.OWNER) {
+      // Owner sees all items - no filter
+      shopId = undefined;
+    } else if (userRole === UserRole.ADMIN || userRole === UserRole.STAFF) {
+      // Staff/Admin: filter by their shop_id
+      if (!user.shopId && !user.tukaanId) {
         return NextResponse.json({ error: 'You must be associated with a shop' }, { status: 403 });
       }
-    }
-    // Customer cannot view items list (they can only see items when creating invoices)
-    if (userRole === UserRole.CUSTOMER) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
-
-    // Filter by taken type and customer/date (legacy schema primarily)
-    // For new schema (no payment_type / taken_by), these filters may not apply
-    if (takenType === 'DEEN') {
-      whereConditions.push("(payment_type = 'DEEN' OR payment_type IS NULL)");
-    } else if (takenType === 'LA_BIXSHAY') {
-      whereConditions.push("payment_type = 'LA_BIXSHAY'");
-    }
-
-    if (customerId) {
-      // Try customer_phone_taken_by first (actual schema), fallback to taken_by (legacy)
-      whereConditions.push('(customer_phone_taken_by = ? OR taken_by = ?)');
-      params.push(customerId, customerId);
-    }
-
-    if (startDate && endDate) {
-      whereConditions.push('DATE(taken_date) >= ?');
-      whereConditions.push('DATE(taken_date) <= ?');
-      params.push(startDate, endDate);
-    }
-
-    const whereClause = whereConditions.length > 0
-      ? `WHERE ${whereConditions.join(' AND ')}`
-      : '';
-
-    // Fetch items from items table (using actual database schema)
-    // Actual schema: customer_phone_taken_by, shop_id, staff_id, payment_type
-    let items: any[] = [];
-    try {
-      // Try actual schema first: customer_phone_taken_by, shop_id, staff_id
-      items = await query<{
-        id: string;
-        shop_id: string | null;
-        item_name: string;
-        detail: string | null;
-        quantity: number;
-        price: number;
-        customer_phone_taken_by: string | null;
-        taken_by: string | null;
-        taken_date: string | null;
-        staff_id: string | null;
-        user_id: string | null;
-        payment_type: string | null;
-        created_at: Date;
-      }>(
-        `SELECT 
-          id, shop_id, item_name, detail, quantity, price, 
-          customer_phone_taken_by, taken_by, taken_date, staff_id, user_id, payment_type, created_at
-         FROM items 
-         ${whereClause}
-         ORDER BY created_at DESC`,
-        params
-      );
-    } catch (error: any) {
-      // If customer_phone_taken_by doesn't exist, try with taken_by
-      if (error.code === 'ER_BAD_FIELD_ERROR' || error.message?.includes('customer_phone_taken_by') || error.message?.includes('staff_id')) {
-        // Fallback to legacy schema with taken_by and user_id
-        const oldWhereClause = whereClause
-          .replace(/customer_phone_taken_by = \?/g, 'taken_by = ?')
-          .replace(/shop_id = \?/g, 'user_id = ?');
-
-        items = await query<{
-          id: string;
-          item_name: string;
-          detail: string | null;
-          quantity: number;
-          price: number;
-          taken_by: string | null;
-          taken_date: string | null;
-          user_id: string | null;
-          shop_id: string | null;
-          payment_type: string | null;
-          created_at: Date;
-        }>(
-          `SELECT 
-            id, item_name, detail, quantity, price, taken_by, taken_date, user_id, shop_id,
-            payment_type, created_at
-           FROM items 
-           ${oldWhereClause || 'WHERE 1=1'}
-           ORDER BY created_at DESC`,
-          params.length > 0 ? params : []
-        );
-      } else {
-        throw error;
+      shopId = user.shopId || user.tukaanId;
+    } else if (userRole === UserRole.CUSTOMER) {
+      // Customer: filter by their phone AND shop_id
+      if (!user.phone) {
+        return NextResponse.json({ error: 'Phone number not found in session' }, { status: 403 });
       }
+      if (!user.shopId && !user.tukaanId) {
+        return NextResponse.json({ error: 'You must be associated with a shop' }, { status: 403 });
+      }
+      customerPhone = user.phone;
+      shopId = user.shopId || user.tukaanId;
     }
+
+    // For customers, always filter by their phone (enforced)
+    const customerPhoneFilter = userRole === UserRole.CUSTOMER 
+      ? customerPhone 
+      : (customerId || undefined);
+
+    const { where: filterWhere, params: filterParams } = addItemFilters(
+      [],
+      [],
+      {
+        paymentType: takenType === 'CASH' ? 'CASH' : takenType === 'DEEN' ? 'DEEN' : 'ALL',
+        customerPhone: customerPhoneFilter,
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
+      }
+    );
+
+    const { sql, params: queryParams } = buildItemsQuery(shopId, filterWhere);
+    // Merge params: shopId param comes first from buildItemsQuery, then filter params
+    const allParams = [...queryParams, ...filterParams];
+
+    // Fetch items using optimized query
+    const items = await query<ItemQueryResult>(sql, allParams);
 
     // Compute totals based on payment_type and quantity * price
     let totalDeen = 0;
@@ -140,23 +91,47 @@ export async function GET(req: NextRequest) {
 
       if (paymentType === 'DEEN') {
         totalDeen += total;
-      } else if (paymentType === 'LA_BIXSHAY' || paymentType === 'PAID') {
+      } else if (paymentType === 'CASH' || paymentType === 'LA_BIXSHAY' || paymentType === 'PAID') {
         totalPaid += total;
       }
 
+      // Build customer info (who took the item) - ALWAYS EXISTS
+      const customerInfo = {
+        id: item.taken_by_customer_id,
+        firstName: item.taken_by_customer_first_name,
+        middleName: item.taken_by_customer_middle_name,
+        lastName: item.taken_by_customer_last_name,
+        phone: item.taken_by_customer_phone,
+        fullName: `${item.taken_by_customer_first_name || ''} ${item.taken_by_customer_middle_name || ''} ${item.taken_by_customer_last_name || ''}`.trim(),
+      };
+
+      // Build staff info (who recorded the item) - ALWAYS EXISTS
+      const staffInfo = {
+        id: item.recorded_by_staff_id,
+        firstName: item.recorded_by_staff_first_name,
+        middleName: item.recorded_by_staff_middle_name,
+        lastName: item.recorded_by_staff_last_name,
+        phone: item.recorded_by_staff_phone,
+        role: item.recorded_by_staff_role,
+        fullName: `${item.recorded_by_staff_first_name || ''} ${item.recorded_by_staff_middle_name || ''} ${item.recorded_by_staff_last_name || ''}`.trim(),
+      };
+
       return {
         id: item.id,
-        shopId: item.shop_id || null,
+        shopId: item.shop_id,
+        shopName: item.shop_name,
+        shopLocation: item.shop_location,
         itemName: item.item_name,
         description: item.detail || null,
         price,
         quantity: item.quantity || null,
-        tag: null, // Not in actual schema
-        status: 'ACTIVE', // Default status
-        createdBy: item.staff_id || item.user_id || null,
-        takenBy: item.customer_phone_taken_by || item.taken_by || null,
+        createdBy: item.staff_id,
+        takenBy: item.customer_phone_taken_by,
+        takenByType: 'CUSTOMER', // Always CUSTOMER - items are always taken by customers
+        customerInfo,
+        staffInfo,
         takenDate: item.taken_date || null,
-        userId: item.staff_id || item.user_id || null,
+        userId: item.staff_id,
         paymentType: paymentType || null,
         createdAt: item.created_at,
         updatedAt: item.created_at,
@@ -169,6 +144,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       success: true,
       items: mappedItems,
+      totalDeen,
+      totalPaid,
+      balance,
       totals: {
         totalDeen,
         totalPaid,

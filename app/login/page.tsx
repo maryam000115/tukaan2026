@@ -6,6 +6,7 @@ import { validatePhone, validatePassword } from '@/lib/validation';
 
 export default function LoginPage() {
   const router = useRouter();
+  const [accountType, setAccountType] = useState<'staff' | 'admin' | 'customer'>('staff');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -51,25 +52,58 @@ export default function LoginPage() {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone, password }),
+        body: JSON.stringify({ phone, password, accountType }),
+        credentials: 'include', // ✅ IMPORTANT: Include cookies in request/response
       });
 
       const data = await res.json();
+
+      // Debug logging
+      console.log('Login API response:', {
+        status: res.status,
+        ok: res.ok,
+        success: data.success,
+        hasUser: !!data.user,
+        message: data.message,
+        error: data.error,
+      });
 
       if (!res.ok) {
         if (res.status === 503) {
           router.push('/locked');
           return;
         }
-        setApiError(data.message || data.error || 'Login failed');
+        // Check for suspended account (403 status)
+        if (res.status === 403 && data.message?.includes('suspended')) {
+          setApiError('Your account is suspended. Contact admin.');
+        } else {
+          setApiError(data.message || data.error || 'Invalid credentials');
+        }
         setLoading(false);
         return;
       }
 
       if (data.success && data.user) {
-        router.push('/dashboard');
+        console.log('Login successful, redirecting to dashboard...', {
+          accountType: data.user.accountType || data.accountType,
+          userId: data.user.id,
+          status: data.user.status,
+        });
+        
+        // ✅ Small delay to ensure cookie is set before redirect
+        // This prevents race condition where dashboard loads before cookie is available
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // ✅ Redirect based on accountType using full page reload
+        const accountType = data.user.accountType || data.accountType;
+        if (accountType === 'customer') {
+          window.location.href = '/dashboard-customer';
+        } else {
+          window.location.href = '/dashboard-staff';
+        }
       } else {
-        setApiError('Login failed. Please try again.');
+        console.error('Login failed - no user in response:', data);
+        setApiError(data.message || data.error || 'Login failed. Please try again.');
         setLoading(false);
       }
     } catch (err) {
@@ -93,6 +127,29 @@ export default function LoginPage() {
                 <p className="text-sm text-red-800">{apiError}</p>
               </div>
             )}
+
+            <div>
+              <label
+                htmlFor="accountType"
+                className="block text-sm font-medium text-gray-700 mb-2"
+              >
+                Account Type
+              </label>
+              <select
+                id="accountType"
+                name="accountType"
+                value={accountType}
+                onChange={(e) => {
+                  setAccountType(e.target.value as 'staff' | 'admin' | 'customer');
+                  setApiError('');
+                }}
+                className="w-full px-4 py-3 text-base border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900"
+              >
+                <option value="customer">Customer</option>
+                <option value="admin">Admin</option>
+                <option value="staff">Staff</option>
+              </select>
+            </div>
 
             <div>
               <label
